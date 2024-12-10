@@ -8,7 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -46,6 +48,11 @@ func NewVideoProcessor(logger *slog.Logger) *VideoProcessor {
 func (vp *VideoProcessor) ProcessVideo() error {
 	vp.Logger.Info("Processing video into segments.")
 
+	numCPUs := runtime.NumCPU()
+	sem := make(chan struct{}, numCPUs)
+	var wg sync.WaitGroup
+	var errChan = make(chan error, len(vp.Config.Resolutions))
+
 	frameRateCmd := exec.Command("ffprobe", "-v", "0", "-of", "default=noprint_wrappers=1:nokey=1",
 		"-select_streams", "v:0", "-show_entries", "stream=avg_frame_rate", vp.InputFile)
 
@@ -70,17 +77,36 @@ func (vp *VideoProcessor) ProcessVideo() error {
 
 		playlist := filepath.Join(vp.OutputDir, fmt.Sprintf("%s.m3u8", outputName))
 
-		ffmpegCmd := exec.Command("ffmpeg", "-y", "-i", vp.InputFile,
-			"-c:v", "libx264", "-preset", vp.Config.Preset, "-crf", "12", "-profile:v", "high", "-level:v", level,
-			"-s", resolution, "-b:v", bitrate, "-maxrate", maxrate, "-bufsize", bufsize,
-			"-c:a", "aac", "-b:a", audioRate, "-ac", "2",
-			"-g", strconv.Itoa(gopSize), "-keyint_min", strconv.Itoa(gopSize), "-sc_threshold", "0",
-			"-hls_time", "4", "-hls_list_size", "0", "-hls_flags", "independent_segments",
-			"-hls_segment_filename", filepath.Join(vp.OutputDir, fmt.Sprintf("%s_%%03d.ts", outputName)),
-			playlist)
-		if err := ffmpegCmd.Run(); err != nil {
-			vp.Logger.Error("Error processing resolution", "resolution", resolution, "error", err)
-			return fmt.Errorf("error processing %s: %w", resolution, err)
+		sem <- struct{}{}
+		wg.Add(1)
+
+		go func(resolution, outputName, bitrate, maxrate, bufsize, playlist string) {
+			defer func() {
+				<-sem
+				wg.Done()
+			}()
+
+			ffmpegCmd := exec.Command("ffmpeg", "-y", "-i", vp.InputFile,
+				"-c:v", "libx264", "-preset", vp.Config.Preset, "-crf", "12", "-profile:v", "high", "-level:v", level,
+				"-s", resolution, "-b:v", bitrate, "-maxrate", maxrate, "-bufsize", bufsize,
+				"-c:a", "aac", "-b:a", audioRate, "-ac", "2",
+				"-g", strconv.Itoa(gopSize), "-keyint_min", strconv.Itoa(gopSize), "-sc_threshold", "0",
+				"-hls_time", "4", "-hls_list_size", "0", "-hls_flags", "independent_segments",
+				"-hls_segment_filename", filepath.Join(vp.OutputDir, fmt.Sprintf("%s_%%03d.ts", outputName)),
+				playlist)
+			if err := ffmpegCmd.Run(); err != nil {
+				vp.Logger.Error("Error processing resolution", "resolution", resolution, "error", err)
+				errChan <- fmt.Errorf("error processing resolution %s: %w", resolution, err)
+			}
+		}(resolution, outputName, bitrate, maxrate, bufsize, playlist)
+	}
+	wg.Wait()
+	close(errChan)
+
+	for err := range errChan {
+		if err != nil {
+			vp.Logger.Error("Error during video processing", "error", err)
+			return fmt.Errorf("error during video processing: %w", err)
 		}
 	}
 
