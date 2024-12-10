@@ -71,7 +71,7 @@ func (vp *VideoProcessor) ProcessVideo() error {
 		playlist := filepath.Join(vp.OutputDir, fmt.Sprintf("%s.m3u8", outputName))
 
 		ffmpegCmd := exec.Command("ffmpeg", "-y", "-i", vp.InputFile,
-			"-c:v", "libx264", "-preset", "slow", "-crf", "12", "-profile:v", vp.Config.Preset, "-level:v", level,
+			"-c:v", "libx264", "-preset", vp.Config.Preset, "-crf", "12", "-profile:v", "high", "-level:v", level,
 			"-s", resolution, "-b:v", bitrate, "-maxrate", maxrate, "-bufsize", bufsize,
 			"-c:a", "aac", "-b:a", audioRate, "-ac", "2",
 			"-g", strconv.Itoa(gopSize), "-keyint_min", strconv.Itoa(gopSize), "-sc_threshold", "0",
